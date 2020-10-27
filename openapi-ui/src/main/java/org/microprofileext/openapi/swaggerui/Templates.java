@@ -1,23 +1,22 @@
 package org.microprofileext.openapi.swaggerui;
 
-import java.awt.Graphics2D;
-import java.awt.image.BufferedImage;
 import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
+import java.util.Optional;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
 import javax.annotation.PostConstruct;
 import javax.enterprise.context.ApplicationScoped;
-import javax.imageio.ImageIO;
 import javax.inject.Inject;
-import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.core.UriInfo;
 import lombok.Getter;
 import lombok.extern.java.Log;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -33,10 +32,7 @@ public class Templates {
  
     @Getter
     private byte[] originalLogo = null;
-    @Getter
-    private byte[] favicon32 = null;
-    @Getter
-    private byte[] favicon16 = null;
+    
     @Getter
     private String style = null;
     
@@ -47,39 +43,22 @@ public class Templates {
     
     @PostConstruct
     public void afterCreate() {
-        BufferedImage image = getLogo();
-        BufferedImage image16 = getFavicon(16, image);
-        BufferedImage image32 = getFavicon(32, image);
-        try {
-            this.originalLogo = toBytes(image);
-            log.finest("OpenApi UI: Created logo");
-            this.favicon16 = toBytes(image16);
-            this.favicon32 = toBytes(image32);
-            log.finest("OpenApi UI: Created favicons");
-        } catch (IOException ex) {
-            log.log(Level.SEVERE, null, ex);
-        }
-        
-        this.style = getCss();
-        
+        this.originalLogo = getLogo();
+        log.finest("OpenApi UI: Created logo");
+        this.style = getCss();   
     }
     
-    public String getSwaggerUIHtml(UriInfo uriInfo,HttpServletRequest request){
+    public String getSwaggerUIHtml(RequestInfo requestInfo){
         if(this.swaggerUIHtml==null){
-            this.swaggerUIHtml = parseHtmlTemplate(uriInfo,request);
+            this.swaggerUIHtml = parseHtmlTemplate(requestInfo);
         }
         return this.swaggerUIHtml;
     }
     
-    public byte[] getFavicon(int size){
-        if(size>24)return getFavicon32();
-        return getFavicon16();
-    }
-    
-    private String parseHtmlTemplate(UriInfo uriInfo, HttpServletRequest request){
+    private String parseHtmlTemplate(RequestInfo requestInfo){
         String html = getHTMLTemplate();
         
-        html = html.replaceAll(VAR_CONTEXT_ROOT, getContextRoot(uriInfo,request));
+        html = html.replaceAll(VAR_CONTEXT_ROOT, getContextRoot(requestInfo));
         html = html.replaceAll(VAR_YAML_URL, yamlUrl);
         html = html.replaceAll(VAR_CURRENT_YEAR, getCopyrightYear());
         
@@ -96,35 +75,32 @@ public class Templates {
             log.log(Level.WARNING, "Can not replace dynamic properties in the Open API Swagger template. {0}", uoe.getMessage());
         }
         // Then properties with defaults.
-        html = html.replaceAll(VAR_COPYRIGHT_BY, copyrightBy);
+        html = html.replaceAll(VAR_COPYRIGHT_BY, getCopyrightBy());
         html = html.replaceAll(VAR_TITLE, title);
         html = html.replaceAll(VAR_SWAGGER_THEME, swaggerUiTheme);
-        html = html.replaceAll(VAR_SERVER_INFO, getServerInfo(request));
         
         return html;
     }
     
-    private static final String X_REQUEST_URI = "x-request-uri";
-    private String getOriginalContextPath(UriInfo uriInfo,HttpServletRequest request){
-        String fromHeader = request.getHeader(X_REQUEST_URI);
-        
-        if(fromHeader!=null && !fromHeader.isEmpty()){
-            return getContextPathPart(uriInfo,request,fromHeader);
+    private String getOriginalContextPath(RequestInfo requestInfo){
+        String xRequestUriHeader = requestInfo.getHttpHeaders().getHeaderString(X_REQUEST_URI);
+        if(xRequestUriHeader!=null && !xRequestUriHeader.isEmpty()){
+            return getContextPathPart(requestInfo,xRequestUriHeader);
         }
-        return request.getContextPath();
+        return requestInfo.getContextPath();
     }
     
-    private String getContextPathPart(UriInfo uriInfo,HttpServletRequest request, String fromHeader){
+    private String getContextPathPart(RequestInfo requestInfo,String xRequestUriHeader){
         
-        String restBase = request.getServletPath();
-        String restUrl = restBase + uriInfo.getPath();
+        String restBase = requestInfo.getRestPath();
+        String restUrl = restBase + requestInfo.getUriInfo().getPath();
         
-        int restUrlStart = fromHeader.indexOf(restUrl);
+        int restUrlStart = xRequestUriHeader.indexOf(restUrl);
         
         if(restUrlStart>0){
-            return fromHeader.substring(0, restUrlStart);
+            return xRequestUriHeader.substring(0, restUrlStart);
         }else{
-            return fromHeader;
+            return xRequestUriHeader;
         }
         
     }
@@ -135,14 +111,19 @@ public class Templates {
         }
     }
     
-    private BufferedImage getLogo(){
+    private byte[] getLogo(){
         if(whiteLabel.hasLogo())return whiteLabel.getLogo();
         
-        try(InputStream logo = this.getClass().getClassLoader().getResourceAsStream(FILE_LOGO)){
-            return ImageIO.read(logo);    
+        // Logo
+        InputStream logoStream = this.getClass().getClassLoader().getResourceAsStream(FILE_LOGO);
+        try{
+            if(logoStream!=null){
+                return logoStream.readAllBytes();
+            }
         } catch (IOException ex) {
-            return null;
+            log.warning(ex.getMessage());
         }
+        return null;
     }
     
     private String getCss() {
@@ -182,68 +163,45 @@ public class Templates {
         }
     }
     
-    private BufferedImage getFavicon(int size,BufferedImage original){
-        int type = original.getType() == 0? BufferedImage.TYPE_INT_ARGB : original.getType();
-        return resizeImage(size,original, type);
-    }
-    
-    private BufferedImage resizeImage(int size,BufferedImage originalImage, int type){
-	BufferedImage resizedImage = new BufferedImage(size, size, type);
-	Graphics2D g = resizedImage.createGraphics();
-	g.drawImage(originalImage, 0, 0, size, size, null);
-	g.dispose();
-
-	return resizedImage;
-    }
-    
-    private byte[] toBytes(BufferedImage bufferedImage) throws IOException{
-        try(ByteArrayOutputStream baos = new ByteArrayOutputStream()){
-            ImageIO.write(bufferedImage, PNG, baos);
-            return baos.toByteArray();
-        }
-    }
-    
     private String getCopyrightYear(){
-        if(copyrightYear==null || copyrightYear.isEmpty()){
-            return String.valueOf(Calendar.getInstance().get(Calendar.YEAR));
+        if(copyrightYear.isPresent()){
+            return copyrightYear.get();
         }
-        return copyrightYear;
+        return String.valueOf(Calendar.getInstance().get(Calendar.YEAR));
     }
     
-    private String getServerInfo(HttpServletRequest request){
-        if(serverInfo==null || serverInfo.isEmpty()){
-            return request.getServletContext().getServerInfo();
+    private String getCopyrightBy(){
+        if(copyrightBy.isPresent()){
+            return copyrightBy.get();
         }
-        return serverInfo;
+        return EMPTY;
     }
     
-    private String getContextRoot(UriInfo uriInfo,HttpServletRequest request){
-        if(contextRoot==null || contextRoot.isEmpty()){
-            return getOriginalContextPath(uriInfo,request);
+    private String getContextRoot(RequestInfo requestInfo){
+        if(contextRoot.isPresent()){
+            return contextRoot.get();
         }
-        return contextRoot;
+        return getOriginalContextPath(requestInfo);
     }
     
     private boolean isKnownProperty(String key){
         return KNOWN_PROPERTIES.contains(key);
     }
     
-    private static final List<String> KNOWN_PROPERTIES = Arrays.asList(new String[]{"openapi.ui.serverVisibility","openapi.ui.exploreFormVisibility","openapi.ui.swaggerHeaderVisibility","openapi.ui.copyrightBy","openapi.ui.copyrightYear","openapi.ui.title","openapi.ui.serverInfo","openapi.ui.contextRoot","openapi.ui.yamlUrl","openapi.ui.swaggerUiTheme"});
+    private static final String X_REQUEST_URI = "x-request-uri";
+    private static final List<String> KNOWN_PROPERTIES = Arrays.asList(new String[]{"openapi.ui.serverVisibility","openapi.ui.exploreFormVisibility","openapi.ui.swaggerHeaderVisibility","openapi.ui.copyrightBy","openapi.ui.copyrightYear","openapi.ui.title","openapi.ui.contextRoot","openapi.ui.yamlUrl","openapi.ui.swaggerUiTheme"});
     
-    @Inject @ConfigProperty(name = "openapi.ui.copyrightBy", defaultValue = "")
-    private String copyrightBy;
+    @Inject @ConfigProperty(name = "openapi.ui.copyrightBy")
+    private Optional<String> copyrightBy;
     
-    @Inject @ConfigProperty(name = "openapi.ui.copyrightYear", defaultValue = "")
-    private String copyrightYear;
+    @Inject @ConfigProperty(name = "openapi.ui.copyrightYear")
+    private Optional<String> copyrightYear;
     
     @Inject @ConfigProperty(name = "openapi.ui.title", defaultValue = "MicroProfile - Open API")
     private String title;
     
-    @Inject @ConfigProperty(name = "openapi.ui.serverInfo", defaultValue = "")
-    private String serverInfo;
-    
-    @Inject @ConfigProperty(name = "openapi.ui.contextRoot", defaultValue = "")
-    private String contextRoot;
+    @Inject @ConfigProperty(name = "openapi.ui.contextRoot")
+    private Optional<String> contextRoot;
     
     @Inject @ConfigProperty(name = "openapi.ui.yamlUrl", defaultValue = "/openapi")
     private String yamlUrl;
@@ -269,7 +227,6 @@ public class Templates {
     private static final String VAR_COPYRIGHT_BY = "%copyrighBy%";
     private static final String VAR_TITLE = "%title%";
     private static final String VAR_CURRENT_YEAR = "%currentYear%";
-    private static final String VAR_SERVER_INFO = "%serverInfo%";
     private static final String VAR_CONTEXT_ROOT = "%contextRoot%";
     private static final String VAR_YAML_URL = "%yamlUrl%";
     
@@ -282,12 +239,10 @@ public class Templates {
     
     private static final String PERSENTAGE = "%";
     
-    private static final String PNG = "png";
     private static final String NL = "\n";
     private static final String EMPTY = "";
     private static final String FILE_TEMPLATE = "META-INF/resources/templates/template.html";
     private static final String FILE_LOGO = "META-INF/resources/templates/logo.png";
     private static final String FILE_STYLE = "META-INF/resources/templates/style.css";
     private static final String KEY_IDENTIFIER = "openapi.ui.";
-
 }
